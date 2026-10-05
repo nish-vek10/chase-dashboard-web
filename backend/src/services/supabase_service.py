@@ -27,6 +27,7 @@ Provides:
 """
 
 import os
+import threading
 import time
 from functools import lru_cache, reduce
 from datetime import date, datetime, timedelta
@@ -75,14 +76,31 @@ _TTL   = 60          # seconds — all read-only tables cached for 60s
 _cache: dict = {}    # key → { "val": ..., "ts": float }
 
 
+_key_locks: dict = {}
+_key_locks_guard = threading.Lock()
+
+
 def _get_cached(key: str, fetcher, ttl: int = _TTL):
-    """Return cached value if still fresh, else fetch, store, return."""
+    """Return cached value if still fresh, else fetch, store, return.
+
+    Per-key lock (2026-10-05, perf): the Portfolio page fires several
+    requests at once; on an empty/expired cache each used to fetch the same
+    table in parallel (seen: user_pfees_estimation x4). Now the first caller
+    fetches and the others wait for its result. RLock so a fetcher may call
+    other cached getters (including itself recursively) without deadlock.
+    """
     entry = _cache.get(key)
     if entry and time.monotonic() - entry["ts"] < ttl:
         return entry["val"]
-    val = fetcher()
-    _cache[key] = {"val": val, "ts": time.monotonic()}
-    return val
+    with _key_locks_guard:
+        lock = _key_locks.setdefault(key, threading.RLock())
+    with lock:
+        entry = _cache.get(key)                       # filled while we waited?
+        if entry and time.monotonic() - entry["ts"] < ttl:
+            return entry["val"]
+        val = fetcher()
+        _cache[key] = {"val": val, "ts": time.monotonic()}
+        return val
 
 
 def _invalidate(*keys: str) -> None:
@@ -617,25 +635,47 @@ def _axia_clients_by_id(table: str = "axia_clients") -> dict[str, dict]:
     return _get_cached(f"clients_by_id_{table}", _fetch)
 
 
+_EQUITY_COLS = "id,client,account,trade_date,currency,equity,chg_nlv,capital_flow_type,capital_transfer_id"
+
+
+def _equity_table_rows(table: str) -> list[dict]:
+    """
+    Every row of a daily-equity table (AXIA, IG, or a daily Data Feed),
+    ordered by trade_date asc, cached 60s — ONE read per table per refresh.
+
+    Perf 2026-10-05: previously each client was read separately for its
+    series, again for its flagged-capital total, and the whole table again
+    for linked ledger ids (axia_daily_equity was read 9x per Portfolio
+    load). The three helpers below now filter this one cached list, giving
+    identical results. Paged in 1,000s so PostgREST's row cap can never
+    silently truncate it.
+    """
+    def _fetch():
+        out, start, page = [], 0, 1000
+        while True:
+            rows = (
+                get_client().table(table).select(_EQUITY_COLS)
+                .order("trade_date", desc=False).order("id", desc=False)
+                .range(start, start + page - 1)
+                .execute().data or []
+            )
+            out.extend(rows)
+            if len(rows) < page:
+                return out
+            start += page
+    return _get_cached(f"equity_table_{table}", _fetch)
+
+
 def _axia_equity_series(client: str, account: str, table: str = "axia_daily_equity") -> list[dict]:
     """
     GBP-only daily-equity rows for a client/account from the given table,
     sorted by date asc. Cached 60s. Returns [{ "date": "YYYY-MM-DD", "equity": float }, ...]
     """
-    def _fetch():
-        rows = (
-            get_client()
-            .table(table)
-            .select("trade_date,equity,currency")
-            .eq("client", client)
-            .eq("account", account)
-            .eq("currency", "GBP")
-            .order("trade_date", desc=False)
-            .execute()
-            .data or []
-        )
-        return [{"date": r["trade_date"], "equity": float(r["equity"])} for r in rows]
-    return _get_cached(f"equity_{table}_{client}_{account}", _fetch)
+    return [
+        {"date": r["trade_date"], "equity": float(r["equity"])}
+        for r in _equity_table_rows(table)
+        if r["client"] == client and r["account"] == account and r["currency"] == "GBP"
+    ]
 
 
 def _daily_equity_tables() -> list[str]:
@@ -669,11 +709,8 @@ def _equity_linked_capital_transfer_ids() -> set:
     def _fetch():
         ids = set()
         for table in _daily_equity_tables():
-            rows = (
-                get_client().table(table).select("capital_transfer_id")
-                .execute().data or []
-            )
-            ids.update(int(r["capital_transfer_id"]) for r in rows if r.get("capital_transfer_id") is not None)
+            ids.update(int(r["capital_transfer_id"]) for r in _equity_table_rows(table)
+                       if r.get("capital_transfer_id") is not None)
         return ids
     return _get_cached("equity_linked_capital_transfer_ids", _fetch)
 
@@ -691,12 +728,8 @@ def _axia_flagged_equity_total(client: str, account: str, table: str = "axia_dai
     flagged yet (transitional strategies pre-dating this feature).
     """
     def _fetch():
-        rows = (
-            get_client().table(table)
-            .select("equity,chg_nlv,capital_flow_type,currency")
-            .eq("client", client).eq("account", account).eq("currency", "GBP")
-            .execute().data or []
-        )
+        rows = [r for r in _equity_table_rows(table)
+                if r["client"] == client and r["account"] == account and r["currency"] == "GBP"]
         total = 0.0
         for r in rows:
             if r.get("capital_flow_type") not in CAPITAL_FLOW_TYPES:
@@ -725,7 +758,7 @@ def _capital_transfers_by_strategy() -> dict[int, dict]:
     """
     def _fetch():
         excluded = _equity_linked_capital_transfer_ids()
-        rows = get_client().table("capital_transfers").select("*").execute().data or []
+        rows = list_capital_transfers()   # same rows, shared cache (perf 2026-10-05; sums are order-independent)
         agg: dict[int, dict] = {}
         for r in rows:
             if r.get("id") in excluded:

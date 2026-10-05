@@ -1030,6 +1030,17 @@ are both correct. Not requested to be fixed further.
   `6b3b16f`) — record closed-trade net P/L in USD on the INVESTGTX Data Feed;
   auto-converted at OANDA GBP/USD (live 1-min close today, daily close for
   past dates) and saved as a GBP row the Portfolio reads.
+- [x] **Backend load-time pass** (2026-10-05) — measured with
+  `backend/tests/perf_profile.py` (read-only: DB calls + time per endpoint,
+  cold/warm, and the Portfolio page's calls fired together). Each
+  daily-equity table is now read once per cache refresh and filtered in
+  memory (`_equity_table_rows`, paged in 1,000s) instead of once per client
+  per helper (axia_daily_equity was read 9×); `capital_transfers_by_strategy`
+  reuses the cached `list_capital_transfers()`; `_get_cached` has a per-key
+  lock so simultaneous requests share one fetch. Portfolio cold load
+  43 → 25 DB calls, 1.9 s → 1.2 s; page with its calls together 1.06 s →
+  0.56 s; hierarchy tabs 1.2–1.4 s → 0.6 s. Results proven identical by
+  `backend/tests/verify_equity_cache.py` (old vs new, every client/table).
 
 ---
 
@@ -1875,8 +1886,11 @@ Margin (50% of notional). Tap a row → per-night swap ledger.
 **Closed Positions table** — per trade: gross, open fee, close fee, swaps,
 **Net P/L** (fully costed), nights held.
 
-**Daily Reconciliation Log** — per statement: statement vs engine balance
-(Diff), today realised, fees, swaps, closed gross, cash flow (deposits /
+**Daily Reconciliation Log** — per statement: Balance · Δ (statement balance
+with the engine − statement Δ beside it in small type, red on a mismatch;
+hover for the engine figure), **Open P/L** (the statement's open gross P/L
+that day — unrealised, before fees/swaps; engine figure beside it in red only
+on a mismatch; added 2026-10-05), today realised, fees, swaps, closed gross, cash flow (deposits /
 withdrawals detected as balance change not explained by realised P/L),
 implied swap rate, ✓/✗ (balance, realised, open P/L, margin). **Raw** shows
 the pasted text; 🗑 deletes a statement (the rest re-replay automatically).

@@ -315,9 +315,11 @@ function ReconLog({ log, statements, onDelete, onViewRaw }) {
   const idByDate = Object.fromEntries(statements.map(s => [s.date, s.id]))
   const rows = [...log].reverse()
   return (
-    <TableWrap minWidth={1120}>
+    <TableWrap minWidth={1020}>
       <thead><tr>
-        <th style={thL}>Date</th><th style={th}>Stmt balance</th><th style={th}>Engine balance</th><th style={th}>Diff</th>
+        {/* Balance = statement balance, with engine diff underneath (was 3 columns: stmt / engine / diff) */}
+        <th style={thL}>Date</th><th style={th} title="Statement balance · Δ = engine − statement (hover a row for the engine figure)">Balance · Δ</th>
+        <th style={th} title="Open gross P/L on the statement date (unrealised, before fees/swaps)">Open P/L</th>
         <th style={th}>Today realised</th><th style={th}>Fees</th><th style={th}>Swaps</th><th style={th}>Closed gross</th>
         <th style={th}>Cash flow</th><th style={th}>Implied rate</th><th style={{ ...th, textAlign: 'center' }}>Check</th><th style={th} />
       </tr></thead>
@@ -326,9 +328,18 @@ function ReconLog({ log, statements, onDelete, onViewRaw }) {
           <Fragment key={r.date}>
             <tr>
               <td style={{ ...tdL, fontWeight: 600 }}>{fmtDate(r.date)}</td>
-              <td style={td}>{fmtUsd(r.stmt_balance)}</td>
-              <td style={td}>{fmtUsd(r.engine_balance)}</td>
-              <td style={{ ...td, color: r.checks.balance ? C.dim : C.neg, fontWeight: r.checks.balance ? 400 : 700 }}>{fmtUsd(r.balance_diff)}</td>
+              <td style={td} title={`Engine balance ${fmtUsd(r.engine_balance)}`}>
+                {fmtUsd(r.stmt_balance)}
+                <span style={{ marginLeft: 6, fontSize: 10, color: r.checks.balance ? C.muted : C.neg, fontWeight: r.checks.balance ? 400 : 700 }}>
+                  Δ{fmtUsd(r.balance_diff)}
+                </span>
+              </td>
+              <td style={{ ...td, color: tone(r.stmt_open_pl) }}>
+                {r.stmt_open_pl ? fmtUsd(r.stmt_open_pl, { sign: true }) : <span style={{ color: C.dim }}>{fmtUsd(0)}</span>}
+                {!r.checks.open_pl && (
+                  <span style={{ marginLeft: 6, fontSize: 10, color: C.neg, fontWeight: 700 }}>eng {fmtUsd(r.engine_open_pl, { sign: true })}</span>
+                )}
+              </td>
               <td style={{ ...td, color: tone(r.stmt_realised) }}>{fmtUsd(r.stmt_realised, { sign: true })}</td>
               <td style={{ ...td, color: r.fees ? C.neg : C.dim }}>{fmtUsd(r.fees)}</td>
               <td style={{ ...td, color: r.swaps ? C.neg : C.dim }}>{fmtUsd(r.swaps)}</td>
@@ -345,13 +356,16 @@ function ReconLog({ log, statements, onDelete, onViewRaw }) {
               <td style={{ ...td, textAlign: 'center' }} title={Object.entries(r.checks).map(([k, v]) => `${k}: ${v ? '✓' : '✗'}`).join('  ')}>
                 <span style={{ color: r.ok ? C.pos : C.neg, fontWeight: 700 }}>{r.ok ? '✓' : '✗'}</span>
               </td>
-              <td style={{ ...td, display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
-                <button onClick={() => onViewRaw(idByDate[r.date])} style={{ ...btn(), padding: '3px 8px', fontSize: 11 }}>Raw</button>
-                <button onClick={() => onDelete(idByDate[r.date], r.date)} style={{ ...btn(), padding: '3px 8px', fontSize: 11, color: C.neg }}>🗑</button>
+              {/* flex on an inner div, not the <td> — a flex <td> stops being a table cell and its row border drifts */}
+              <td style={td}>
+                <div style={{ display: 'flex', gap: 6, justifyContent: 'flex-end' }}>
+                  <button onClick={() => onViewRaw(idByDate[r.date])} style={{ ...btn(), padding: '3px 8px', fontSize: 11 }}>Raw</button>
+                  <button onClick={() => onDelete(idByDate[r.date], r.date)} style={{ ...btn(), padding: '3px 8px', fontSize: 11, color: C.neg }}>🗑</button>
+                </div>
               </td>
             </tr>
             {(!r.ok || r.warnings.length > 0) && (
-              <tr><td colSpan={12} style={{ padding: '6px 12px', fontSize: 11, color: r.ok ? C.warn : C.neg, background: C.bg, borderBottom: `1px solid ${C.border}`, whiteSpace: 'normal' }}>
+              <tr><td colSpan={11} style={{ padding: '6px 12px', fontSize: 11, color: r.ok ? C.warn : C.neg, background: C.bg, borderBottom: `1px solid ${C.border}`, whiteSpace: 'normal' }}>
                 {!r.ok && <div>Failed: {Object.entries(r.checks).filter(([, v]) => !v).map(([k]) => k).join(', ')} — stmt open P/L {fmtUsd(r.stmt_open_pl)} vs engine {fmtUsd(r.engine_open_pl)}; stmt realised {fmtUsd(r.stmt_realised)} vs engine {fmtUsd(r.engine_realised)}</div>}
                 {r.warnings.map((w, i) => <div key={i}>⚠ {w}</div>)}
               </td></tr>
