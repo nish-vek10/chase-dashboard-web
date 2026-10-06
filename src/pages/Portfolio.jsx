@@ -33,6 +33,7 @@ import PodStrategyManager  from '../components/PodStrategyManager.jsx'
 // Config
 // ---------------------------------------------------------------------------
 
+const API             = import.meta.env.VITE_API_BASE ?? ''
 const POD_COLORS     = ['#0EA5E9', '#F59E0B', '#34D399', '#A78BFA', '#F472B6']
 const HIERARCHY_TABS = ['pod', 'strategy', 'trader']
 
@@ -405,7 +406,31 @@ export default function Portfolio({ timeRange, initialTab }) {
   const isMobile  = useIsMobile()
   const [activeTab,    setActiveTab]    = useState(initialTab || 'pod')
   const [showManager,  setShowManager]  = useState(false)
+  const [exportingCsv, setExportingCsv] = useState(false)
   const summaryStripRef = useRef(null)
+
+  // ── Strategies CSV export (2026-09-24, Nish) — every strategy, every
+  // status, straight from the same KPI engine the cards below render from,
+  // so it always matches what's on screen. See backend/src/routers/portfolio.py.
+  const handleExportStrategiesCsv = async () => {
+    setExportingCsv(true)
+    try {
+      const res = await fetch(`${API}/api/portfolio/strategies/export-csv`)
+      if (!res.ok) throw new Error('Export failed')
+      const blob = await res.blob()
+      const url  = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      const today = new Date().toISOString().slice(0, 10)
+      link.download = `Chase-Strategies-${today}.csv`
+      link.click()
+      URL.revokeObjectURL(url)
+    } catch {
+      // Non-fatal — a failed export shouldn't disrupt the page
+    } finally {
+      setExportingCsv(false)
+    }
+  }
 
   // Sync tab when route changes (e.g. clicking Traders in navbar)
   useEffect(() => {
@@ -555,7 +580,23 @@ export default function Portfolio({ timeRange, initialTab }) {
       <div style={{ height: 1, background: '#1E3A5F', margin: '0 0 16px' }} />
 
       {/* ── Strategies overview ── */}
-      <SectionLabel>Strategies Overview</SectionLabel>
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', paddingBottom: 10 }}>
+        <SectionLabel>Strategies Overview</SectionLabel>
+        <button
+          onClick={handleExportStrategiesCsv}
+          disabled={exportingCsv}
+          title="Every strategy, active and inactive — Initial Investment, Current Equity (Gross, before watermark/profit-share) and Net"
+          style={{
+            display:    'flex', alignItems: 'center', gap: 6,
+            padding:    '6px 12px', borderRadius: 7, border: '1px solid rgba(52,211,153,0.3)',
+            cursor:     exportingCsv ? 'not-allowed' : 'pointer', fontSize: 11, fontWeight: 600,
+            background: 'rgba(52,211,153,0.08)', color: '#34D399',
+            marginBottom: 10, opacity: exportingCsv ? 0.6 : 1,
+          }}
+        >
+          {exportingCsv ? '⏳ Exporting…' : '⬇ Export Strategies CSV'}
+        </button>
+      </div>
       <div className="ov-grid" style={{
         gridTemplateColumns: isMobile ? '1fr' : 'repeat(2, minmax(0, 1fr))',
         marginBottom: 26,
