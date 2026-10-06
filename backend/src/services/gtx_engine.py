@@ -84,11 +84,52 @@ class Lot:
     swaps: float = 0.0
     swap_ledger: list = field(default_factory=list)
     status: str = "open"
+    parent_id: str | None = None  # set on a partial close split off another lot
+    margin_rate: float | None = None  # from the statement's own per-position Margin (2026-10-06)
+
+    def margin(self, default_pct: float) -> float:
+        if self.status != "open" or not self.current_px:
+            return 0.0
+        rate = self.margin_rate if self.margin_rate is not None else default_pct / 100
+        return self.qty * self.current_px * rate
 
     def unrealised(self) -> float:
         if self.status != "open" or self.current_px is None:
             return 0.0
         return (self.current_px - self.open_px) * self.qty * self.side
+
+
+def _close_fill(lots: dict, lid: str, t: dict, s: dict, splits: list) -> tuple[float, float]:
+    """
+    Book closing trade t against lot lid — whole or PARTIAL (2026-10-06).
+
+    Whole: the lot itself becomes closed. Partial: the closed quantity is
+    split off into its own closed lot ("<lid>#n") carrying its pro-rata share
+    of the open fee and of the swaps paid so far (fee per unit and swap per
+    unit are identical for every unit of a lot, so the split is exact); the
+    parent keeps the remaining quantity open. Returns (gross, close_fee).
+    """
+    lot = lots[lid]
+    q = t["qty"]
+    fee = q * s["fee_per_unit"]
+    gross = (t["price"] - lot.open_px) * q * lot.side
+    if abs(q - lot.qty) < 1e-9:
+        lot.status, lot.close_px, lot.close_dt = "closed", t["price"], t["dt"]
+        lot.gross, lot.close_fee, lot.current_px = gross, fee, None
+        return gross, fee
+    f = q / lot.qty
+    k = 1 + sum(1 for x in list(lots) + [c.lot_id for c in splits] if x.startswith(lid + "#"))
+    child = Lot(f"{lid}#{k}", lot.instrument, lot.side, q, lot.open_px, lot.open_dt,
+                close_px=t["price"], close_dt=t["dt"], gross=gross,
+                open_fee=lot.open_fee * f, close_fee=fee, swaps=lot.swaps * f,
+                swap_ledger=[{**e, "amount": e["amount"] * f} for e in lot.swap_ledger],
+                status="closed", parent_id=lid)
+    lot.qty -= q
+    lot.open_fee -= child.open_fee
+    lot.swaps -= child.swaps
+    lot.swap_ledger = [{**e, "amount": e["amount"] * (1 - f)} for e in lot.swap_ledger]
+    splits.append(child)
+    return gross, fee
 
 
 def _lot_id(instrument: str, open_dt: str) -> str:
@@ -132,61 +173,68 @@ def replay(statements: list[dict], settings: dict | None = None) -> dict:
             lid = _lot_id(p["instrument"], p["open_dt"])
             today_ids.add(lid)
             if lid not in lots:
-                fee = p["qty"] * s["fee_per_unit"]
-                lots[lid] = Lot(lid, p["instrument"], p["side"], p["qty"],
+                # opened today and partly closed today: open at the traded qty, the
+                # partial close is matched in step 2
+                opened = next((t["qty"] for t in st["trades"]
+                               if _lot_id(t["instrument"], t["dt"]) == lid and abs(t["profit"]) < 1e-9), None)
+                qty0 = opened if opened and opened > p["qty"] else p["qty"]
+                fee = qty0 * s["fee_per_unit"]
+                lots[lid] = Lot(lid, p["instrument"], p["side"], qty0,
                                 p["open_px"], p["open_dt"], open_fee=fee)
                 if _d(p["open_dt"]).date() == d:
                     fees_today -= fee
                 else:
                     warnings.append(f"Lot {p['instrument']} opened {p['open_dt'][:10]} first seen today")
             lots[lid].current_px = p["current_px"]
+            # margin rate differs per instrument (e.g. 50% Energy Vault, 30%
+            # Chipotle) — take it from the statement's own Margin column
+            if p.get("margin") and p["qty"] and p["current_px"]:
+                lots[lid].margin_rate = p["margin"] / (p["qty"] * p["current_px"])
 
-        # 2. closes — previously open lots now absent; match to Trades Report
+        # 2. closes — whole or partial (2026-10-06), incl. intraday round trips.
+        # Every open lot needs closing by (its qty − its qty still in today's
+        # Open Position Report). Each closing trade is matched to the lot of the
+        # same instrument / opposite side with enough qty left to close whose
+        # open price best reproduces the broker's own profit for that trade.
         trades = list(st["trades"])
         used = set()
-        for lid, lot in lots.items():
-            if lot.status != "open" or lid in today_ids:
+        today_qty: dict[str, float] = {}
+        for p in st["open_positions"]:
+            lid = _lot_id(p["instrument"], p["open_dt"])
+            today_qty[lid] = today_qty.get(lid, 0.0) + p["qty"]
+        for i, t in enumerate(trades):                 # today's opens (profit 0)
+            if abs(t["profit"]) >= 1e-9:
                 continue
-            best, best_err = None, None
-            for i, t in enumerate(trades):
-                if i in used or t["instrument"] != lot.instrument \
-                        or t["side"] != -lot.side or abs(t["qty"] - lot.qty) > 1e-9:
-                    continue
-                err = abs((t["price"] - lot.open_px) * lot.qty * lot.side - t["profit"])
-                if best is None or err < best_err:
-                    best, best_err = i, err
-            if best is None:
-                warnings.append(f"Closed lot {lot.instrument} {lot.qty:,.0f} — no matching close in Trades Report")
+            lid = _lot_id(t["instrument"], t["dt"])
+            if lid in today_ids:
+                used.add(i)                            # still (partly) held — step 1 has it
+            elif lid not in lots:                      # opened and fully closed today
+                fee = t["qty"] * s["fee_per_unit"]
+                lots[lid] = Lot(lid, t["instrument"], t["side"], t["qty"], t["price"], t["dt"], open_fee=fee)
+                fees_today -= fee
+                used.add(i)
+        need = {lid: lot.qty - today_qty.get(lid, 0.0) for lid, lot in lots.items()
+                if lot.status == "open" and lot.qty - today_qty.get(lid, 0.0) > 1e-9}
+        splits: list = []
+        for i, t in sorted(((i, t) for i, t in enumerate(trades) if i not in used), key=lambda x: x[1]["dt"]):
+            cands = [lid for lid, nq in need.items()
+                     if nq >= t["qty"] - 1e-9 and lots[lid].instrument == t["instrument"]
+                     and lots[lid].side == -t["side"]]
+            if not cands:
+                warnings.append(f"Unmatched trade {t['instrument']} {t['qty']:,.0f} {t['dt']}")
                 continue
-            t = trades[best]; used.add(best)
-            lot.status, lot.close_px, lot.close_dt = "closed", t["price"], t["dt"]
-            lot.gross = (t["price"] - lot.open_px) * lot.qty * lot.side
-            lot.close_fee = lot.qty * s["fee_per_unit"]
-            lot.current_px = None
-            fees_today -= lot.close_fee
-            gross_today += lot.gross
-
-        # 3. intraday round trips — open + close both inside today's trades
-        rest = [(i, t) for i, t in enumerate(trades)
-                if i not in used and not any(_lot_id(t["instrument"], t["dt"]) == k for k in today_ids)]
-        opens_ = [(i, t) for i, t in rest if abs(t["profit"]) < 1e-9]
-        closes_ = [(i, t) for i, t in rest if (i, t) not in opens_]
-        for ci, c in closes_:
-            match = next(((oi, o) for oi, o in opens_
-                          if o["instrument"] == c["instrument"] and o["side"] == -c["side"]
-                          and abs(o["qty"] - c["qty"]) < 1e-9 and oi not in used), None)
-            if not match:
-                warnings.append(f"Unmatched trade {c['instrument']} {c['dt']}")
-                continue
-            oi, o = match; used.update({oi, ci})
-            lid = _lot_id(o["instrument"], o["dt"])
-            fee = o["qty"] * s["fee_per_unit"]
-            gross = (c["price"] - o["price"]) * o["qty"] * o["side"]
-            lots[lid] = Lot(lid, o["instrument"], o["side"], o["qty"], o["price"], o["dt"],
-                            close_px=c["price"], close_dt=c["dt"], gross=gross,
-                            open_fee=fee, close_fee=fee, status="closed")
-            fees_today -= 2 * fee
-            gross_today += gross
+            lid = min(cands, key=lambda k: (abs((t["price"] - lots[k].open_px) * t["qty"] * lots[k].side
+                                                - t["profit"]), lots[k].open_dt))
+            used.add(i)
+            need[lid] -= t["qty"]
+            g, f = _close_fill(lots, lid, t, s, splits)
+            gross_today += g
+            fees_today -= f
+        for c in splits:
+            lots[c.lot_id] = c
+        for lid, nq in need.items():
+            if nq > 1e-9:
+                warnings.append(f"Lot {lots[lid].instrument} {nq:,.0f} closed but no matching close in Trades Report")
 
         # 4. swaps — lots open at cutoff today
         # Rate in force: carried forward day to day. A dated schedule entry
@@ -292,7 +340,7 @@ def replay(statements: list[dict], settings: dict | None = None) -> dict:
                                 "opening": prev_stmt_bal is None})
         engine_bal += cash + eng_realised
         open_pl = sum(l.unrealised() for l in lots.values())
-        margin = sum(l.qty * l.current_px * s["margin_pct"] / 100
+        margin = sum(l.margin(s["margin_pct"])
                      for l in lots.values() if l.status == "open" and l.current_px)
         implied_swap = stmt_real - gross_today - fees_today
         implied_rate = (-implied_swap * s["day_count"] * 100 / swap_base) if swap_base else None
@@ -348,7 +396,7 @@ def _build_output(lots, log, cash_events, s) -> dict:
         if l.status == "open":
             r["est_close_fee"] = l.qty * s["fee_per_unit"]
             r["net_if_closed"] = r["unrealised"] - l.open_fee - r["est_close_fee"] + l.swaps
-            r["margin"] = l.qty * (l.current_px or 0) * s["margin_pct"] / 100
+            r["margin"] = l.margin(s["margin_pct"])
         else:
             r["net"] = l.gross - l.open_fee - l.close_fee + l.swaps
         return r

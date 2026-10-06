@@ -1,0 +1,20 @@
+Account Statement Report GTX
+Account name	Balance	Open gross P/L	Projected balance	Available funds	Initial margin req	Margin available	Today's realized P/L	Account currency	Stop out value	Credit value	Account ID	Blocked for fixed income	Fixed income value	Fixed income orders req
+GTX0011-USD	1,358,062.08	-23,341.95	1,334,720.13	1,191,680.13	143,040.00	1,191,680.13	11,369.16	USD	143,040.00	0.00	2776	0.00	0.00	0.00
+
+
+
+Open Position Report GTX
+Account	Instrument	Amount	Open price	Buy/Sell	Open date/time	Current price	Profit	Currency	Margin
+GTX0011-USD	ENERGY VAULT HOLDINGS (CFD)	25,000.00	4.347	Buy	24-09-2026 10:42:19.447	3.87	-11,925.00	USD	48,375.00
+GTX0011-USD	ENERGY VAULT HOLDINGS (CFD)	10,000.00	4.21986	Buy	24-09-2026 12:10:03.117	3.87	-3,498.60	USD	19,350.00
+GTX0011-USD	ENERGY VAULT HOLDINGS (CFD)	15,000.00	4.4334	Buy	25-09-2026 10:50:39.866	3.87	-8,451.00	USD	29,025.00
+GTX0011-USD	CHIPOLTE MEXICAN (CFD)	5,000.00	30.75347	Buy	05-10-2026 13:43:59.145	30.86	532.65	USD	46,290.00
+
+
+
+Trades Report GTX
+Account	Instrument	Operation	Date	Price	Amount	Profit
+GTX0011-USD	QIAGEN (CFD)	Sell	05-10-2026 14:20:08.761	45.60	5,000.00	6,347.74
+GTX0011-USD	CHIPOLTE MEXICAN (CFD)	Buy	05-10-2026 13:43:59.145	30.75347	5,000.00	0.00
+GTX0011-USD	QIAGEN (CFD)	Sell	05-10-2026 13:38:53.235	45.50	5,000.00	5,847.74

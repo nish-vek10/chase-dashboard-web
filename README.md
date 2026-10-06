@@ -1883,6 +1883,25 @@ Unrealised, Nights (swaps charged), Open fee, Swaps, Est. close fee (qty ×
 0.05), **Net if closed** = Unrealised − open fee − est. close fee + swaps,
 Margin (50% of notional). Tap a row → per-night swap ledger.
 
+**Partial closes** (2026-10-06) — a lot can be closed in several trades
+(e.g. QIAGEN 10,000 sold as 2 × 5,000 on 05-10-2026). For every lot the
+engine works out how much was closed (its qty − its qty still in the Open
+Position Report) and matches each closing trade to the lot of that
+instrument whose open price reproduces the broker's own profit for the
+trade. A partial close splits the lot: the closed piece becomes its own
+closed row (tagged **PARTIAL**) with its pro-rata share of the open fee and
+of the swaps paid so far, its own close fee (qty × $0.05) and gross; the
+rest stays open at the reduced qty and only that qty is charged swaps from
+then on. Also handled: a lot opened and partly closed the same day, and an
+intraday round trip closed in pieces. Win rate counts each piece.
+
+**Margin** (2026-10-06) — margin rates differ by instrument (50% Energy
+Vault / QIAGEN, 30% Chipotle), so each position's rate is taken from the
+statement's own Margin column; the ⚙ Margin % setting is only the fallback.
+
+Regression: `python tests\test_gtx_partials.py` (real 05-10 statement in
+`tests/fixtures/gtx_2026-10-05.txt` + 3 synthetic partial scenarios).
+
 **Closed Positions table** — per trade: gross, open fee, close fee, swaps,
 **Net P/L** (fully costed), nights held.
 

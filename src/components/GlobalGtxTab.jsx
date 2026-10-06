@@ -269,6 +269,8 @@ function ClosedTable({ rows }) {
   const [open, setOpen] = useState(null)
   if (!rows.length) return <div style={{ fontSize: 13, color: C.dim, padding: '8px 0' }}>No closed positions yet.</div>
   const tot = k => rows.reduce((a, r) => a + (r[k] || 0), 0)
+  // a lot closed in pieces shows one row per piece — same instrument + open time
+  const pieces = rows.reduce((m, r) => { const k = r.instrument + r.open_dt; m[k] = (m[k] || 0) + 1; return m }, {})
   return (
     <TableWrap minWidth={1200}>
       <thead><tr>
@@ -282,7 +284,12 @@ function ClosedTable({ rows }) {
             <tr onClick={() => setOpen(open === r.lot_id ? null : r.lot_id)} style={{ cursor: 'pointer' }}>
               <td style={{ ...tdL, fontWeight: 600 }}>{open === r.lot_id ? '▾' : '▸'} {shortInst(r.instrument)}</td>
               <td style={tdL}><SideTag side={r.side} /></td>
-              <td style={td}>{fmtNum(r.qty)}</td>
+              <td style={td}>
+                {pieces[r.instrument + r.open_dt] > 1 && (
+                  <span title="Part of a lot closed in pieces" style={{ marginRight: 6, padding: '1px 5px', borderRadius: 4, fontSize: 9, fontWeight: 700, letterSpacing: '0.4px', color: C.warn, border: `1px solid ${C.warn}55` }}>PARTIAL</span>
+                )}
+                {fmtNum(r.qty)}
+              </td>
               <td style={tdL}>{fmtDt(r.open_dt)}</td>
               <td style={td}>{fmtPx(r.open_px)}</td>
               <td style={tdL}>{fmtDt(r.close_dt)}</td>
